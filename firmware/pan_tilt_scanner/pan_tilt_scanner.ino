@@ -50,8 +50,11 @@ const unsigned long SERVO_UPDATE_MS = 20;   // servo signal is 50 Hz
 const int   JOY_DEADZONE   = 60;     // raw counts ignored around centre
 const float JOY_MAX_SPEED  = 70.0;   // deg/s at full deflection
 const float JOY_ACCEL      = 250.0;  // deg/s^2  (lower = smoother/slower response)
-const bool  JOY_INVERT_YAW   = false;
-const bool  JOY_INVERT_PITCH = false;
+// Stick feel (push stick forward = tilt up vs down):
+// Note: This only flips manual joystick stick direction on the hardware.
+// The 3D plot orientation (up/down) is handled in mapper.py (press 'P' to flip).
+const bool  JOY_INVERT_YAW   = true;
+const bool  JOY_INVERT_PITCH = true;
 const unsigned long JOY_SETTLE_MS = 150;    // stand still this long before measuring
 
 // --- Automatic scan grid (degrees) ---

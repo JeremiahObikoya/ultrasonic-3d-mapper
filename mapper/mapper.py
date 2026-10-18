@@ -43,7 +43,10 @@ def parse_args():
     p.add_argument("--yaw-center", type=float, default=90, help="servo yaw angle that points straight ahead")
     p.add_argument("--pitch-center", type=float, default=90, help="servo pitch angle that is level")
     p.add_argument("--invert-yaw", action="store_true", help="flip left/right")
-    p.add_argument("--invert-pitch", action="store_true", help="flip up/down")
+    p.add_argument("--invert-pitch", dest="invert_pitch", action="store_true", default=True,
+                   help="pitch < 90 points UP (default: True)")
+    p.add_argument("--no-invert-pitch", dest="invert_pitch", action="store_false",
+                   help="pitch > 90 points UP")
     p.add_argument("--accumulate", action="store_true",
                    help="keep points from previous auto scans (default: new scan replaces old)")
     p.add_argument("--log", help="save all points to this CSV file on exit")
@@ -146,6 +149,7 @@ class MapState:
         self.args = args
         self.points = {}          # (yaw, pitch) -> (x, y, z, dist); newest reading wins
         self.last_reading = None  # (x, y, z, dist, yaw, pitch) of latest measurement
+        self.last_raw = None      # (yaw, pitch, dist)
         self.mode = "STANDBY"
         self.scans_done = 0
         self.dirty = True
@@ -164,11 +168,13 @@ class MapState:
                 xyz = to_xyz(yaw, pitch, dist, a)
                 self.points[(round(yaw, 1), round(pitch, 1))] = (*xyz, dist)
                 self.last_reading = (*xyz, dist, yaw, pitch)
+                self.last_raw = (yaw, pitch, dist)
                 self.dirty = True
             elif parts[0] == "S":
                 if parts[1] == "START" and not a.accumulate:
                     self.points.clear()
                     self.last_reading = None
+                    self.last_raw = None
                     self.dirty = True
                 elif parts[1] == "END":
                     self.scans_done += 1
@@ -181,9 +187,30 @@ class MapState:
         except (ValueError, IndexError):
             pass                  # ignore corrupted lines
 
+    def toggle_invert_pitch(self):
+        self.args.invert_pitch = not self.args.invert_pitch
+        self.recompute_all()
+
+    def toggle_invert_yaw(self):
+        self.args.invert_yaw = not self.args.invert_yaw
+        self.recompute_all()
+
+    def recompute_all(self):
+        new_points = {}
+        for (yaw, pitch), val in self.points.items():
+            dist = val[3]
+            xyz = to_xyz(yaw, pitch, dist, self.args)
+            new_points[(yaw, pitch)] = (*xyz, dist)
+        self.points = new_points
+        if self.last_raw:
+            lyaw, lpitch, ld = self.last_raw
+            self.last_reading = (*to_xyz(lyaw, lpitch, ld, self.args), ld, lyaw, lpitch)
+        self.dirty = True
+
     def clear(self):
         self.points.clear()
         self.last_reading = None
+        self.last_raw = None
         self.dirty = True
 
     def save_csv(self, path):
@@ -294,7 +321,7 @@ def main():
         pad=14,
         bbox=dict(boxstyle="round,pad=0.5", facecolor="#0f172a", edgecolor="#1e293b", alpha=0.9)
     )
-    fig.text(0.5, 0.02, "[D] Clear Map    •    Left-Drag: Rotate    •    Right-Drag/Scroll: Zoom",
+    fig.text(0.5, 0.02, "[D] Clear Map   •   [P] Flip Pitch (Up/Down)   •   [Y] Flip Yaw   •   Rotate/Zoom: Mouse",
              ha="center", color="#64748b", fontsize=8.5)
 
     def update(_frame):
@@ -329,8 +356,10 @@ def main():
                 hud_ping = "STANDBY"
 
             mode_str = "AUTO SCAN" if "AUTO" in state.mode else ("JOYSTICK" if "JOY" in state.mode else state.mode)
+            pitch_stat = "INV" if state.args.invert_pitch else "NORM"
+            yaw_stat = "INV" if state.args.invert_yaw else "NORM"
             hud_banner.set_text(
-                f"MODE: {mode_str}   |   POINTS: {len(state.points)}   |   SCANS: {state.scans_done}   |   {hud_ping}"
+                f"MODE: {mode_str}   |   PTS: {len(state.points)}   |   SCANS: {state.scans_done}   |   {hud_ping}   |   PITCH:{pitch_stat} YAW:{yaw_stat}"
             )
             state.dirty = False
 
@@ -339,6 +368,12 @@ def main():
     def on_key(event):
         if event.key == "d":
             state.clear()
+        elif event.key == "p":
+            state.toggle_invert_pitch()
+            print(f"[HOTKEY] Pitch inverted: {state.args.invert_pitch} (all points flipped)")
+        elif event.key == "y":
+            state.toggle_invert_yaw()
+            print(f"[HOTKEY] Yaw inverted: {state.args.invert_yaw} (all points flipped)")
 
     fig.canvas.mpl_connect("key_press_event", on_key)
     ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)  # noqa: F841

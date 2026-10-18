@@ -56,6 +56,8 @@ python mapper.py --demo                 # no hardware — simulated room
 | Joystick | Aim the sensor (velocity control) |
 | Joystick button | Toggle joystick ↔ auto-scan mode |
 | `d` key (plot window) | Clear the map |
+| `p` key (plot window) | Flip Pitch inversion (Up ↔ Down) |
+| `y` key (plot window) | Flip Yaw inversion (Left ↔ Right) |
 
 ## How It Works
 

@@ -40,3 +40,4 @@ The mapper converts `(yaw, pitch, distance)` to Cartesian `(X, Y, Z)` in centime
 - **Z** = up
 
 The sensor sits at the origin `(0, 0, 0)`.
+
