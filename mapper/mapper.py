@@ -38,8 +38,10 @@ def parse_args():
     p.add_argument("--port", help="serial port (auto-detected if omitted)")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--demo", action="store_true", help="simulate a scanner, no hardware needed")
-    p.add_argument("--max-range", type=float, default=200, help="plot half-size in cm")
-    p.add_argument("--floor-z", type=float, default=-60.0, help="floor plane elevation in cm (default: -60)")
+    p.add_argument("--max-range", type=float, default=400.0, help="maximum sensor range in cm (default: 400.0)")
+    p.add_argument("--floor-z", type=float, default=-60.0, help="floor plane elevation in cm (default: -60.0)")
+    p.add_argument("--z-min", type=float, default=None, help="minimum Z limit in cm (default: floor_z - 20)")
+    p.add_argument("--z-max", type=float, default=None, help="maximum Z limit in cm (default: max_range + 20)")
     p.add_argument("--yaw-center", type=float, default=90, help="servo yaw angle that points straight ahead")
     p.add_argument("--pitch-center", type=float, default=90, help="servo pitch angle that is level")
     p.add_argument("--invert-yaw", action="store_true", help="flip left/right")
@@ -47,8 +49,8 @@ def parse_args():
                    help="pitch < 90 points UP (default: True)")
     p.add_argument("--no-invert-pitch", dest="invert_pitch", action="store_false",
                    help="pitch > 90 points UP")
-    p.add_argument("--accumulate", action="store_true",
-                   help="keep points from previous auto scans (default: new scan replaces old)")
+    p.add_argument("--clear-on-start", action="store_true",
+                   help="wipe map when each new scan starts (default: False, points update in-place)")
     p.add_argument("--log", help="save all points to this CSV file on exit")
     return p.parse_args()
 
@@ -122,23 +124,32 @@ def fake_distance(yaw, pitch, a):
 
 
 def demo_source(q, stop, a):
-    """Emits the same text protocol the Arduino does."""
+    """Emits the same text protocol the Arduino does with bidirectional sweep."""
     yaws = list(range(20, 161, 5))
-    pitches = list(range(60, 121, 10))
+    pitches_down = list(range(60, 121, 10))
+    pitches_up = pitches_down[-2:0:-1]  # intermediate rows on the way back up
     q.put("# DEMO mode (simulated data)")
     q.put("M,AUTO")
+    q.put("S,START")
+
+    yaw_reversed = False
+    sweep_sequence = [pitches_down, pitches_up]
+    seq_idx = 0
+
     while not stop.is_set():
-        q.put("S,START")
-        for i, p in enumerate(pitches):
-            row = yaws if i % 2 == 0 else yaws[::-1]
+        current_pitches = sweep_sequence[seq_idx % 2]
+        for p in current_pitches:
+            row = yaws[::-1] if yaw_reversed else yaws
             for y in row:
                 if stop.is_set():
                     return
                 d = fake_distance(y, p, a) + random.gauss(0, 0.8)
                 q.put(f"D,{y:.1f},{p:.1f},{d:.1f},A")
-                time.sleep(0.03)
+                time.sleep(0.02)
+            yaw_reversed = not yaw_reversed
         q.put("S,END")
-        time.sleep(2)
+        q.put("S,START")
+        seq_idx += 1
 
 
 # ----------------------------------------------------------------------
@@ -171,11 +182,12 @@ class MapState:
                 self.last_raw = (yaw, pitch, dist)
                 self.dirty = True
             elif parts[0] == "S":
-                if parts[1] == "START" and not a.accumulate:
-                    self.points.clear()
-                    self.last_reading = None
-                    self.last_raw = None
-                    self.dirty = True
+                if parts[1] == "START":
+                    if a.clear_on_start:
+                        self.points.clear()
+                        self.last_reading = None
+                        self.last_raw = None
+                        self.dirty = True
                 elif parts[1] == "END":
                     self.scans_done += 1
                     print(f"Scan {self.scans_done} complete ({len(self.points)} points)")
@@ -241,9 +253,10 @@ def main():
 
     R = args.max_range
     z_floor = args.floor_z
-    x_min, x_max = -R * 0.9, R * 0.9
-    y_min, y_max = -15, R * 1.25
-    z_min, z_max = z_floor - 10, R * 0.85
+    x_min, x_max = -R, R
+    y_min, y_max = -20.0, R + 20.0
+    z_min = args.z_min if args.z_min is not None else (z_floor - 20.0)
+    z_max = args.z_max if args.z_max is not None else (R + 20.0)
 
     # 1. Figure & 3D Axes with Dark Robotics / LiDAR Styling
     fig = plt.figure(figsize=(10, 8), facecolor="#0b0f19")
@@ -274,7 +287,7 @@ def main():
 
     # 3. Ground Radar Reference Grid (at z_floor)
     arc_angles = np.linspace(-np.radians(75), np.radians(75), 60)
-    for r in [50, 100, 150, 200, 250]:
+    for r in range(50, int(R) + 50, 50):
         if r <= y_max:
             xs = r * np.sin(arc_angles)
             ys = r * np.cos(arc_angles)
@@ -285,7 +298,7 @@ def main():
 
     for deg in [-60, -30, 0, 30, 60]:
         rad = np.radians(deg)
-        r_spoke = min(y_max, R * 1.2)
+        r_spoke = min(y_max, R)
         ax.plot([0, r_spoke * np.sin(rad)], [0, r_spoke * np.cos(rad)], [z_floor, z_floor],
                 color="#1e293b", linestyle="--", linewidth=0.7, alpha=0.6)
 
@@ -303,7 +316,7 @@ def main():
 
     # 6. Point Cloud Scatter (Dual-layer emissive LiDAR styling)
     cmap = matplotlib.colormaps["turbo_r"]
-    norm = mcolors.Normalize(vmin=0, vmax=R * 1.3)
+    norm = mcolors.Normalize(vmin=0, vmax=R)
     scat_glow = ax.scatter([], [], [], c=[], cmap=cmap, norm=norm, s=55, alpha=0.25, edgecolors="none")
     scat_core = ax.scatter([], [], [], c=[], cmap=cmap, norm=norm, s=18, alpha=0.92, edgecolors="#ffffff", linewidths=0.2)
 

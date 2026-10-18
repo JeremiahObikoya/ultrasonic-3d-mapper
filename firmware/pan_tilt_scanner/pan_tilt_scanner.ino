@@ -103,9 +103,10 @@ float lastReportedYaw   = -1000;
 float lastReportedPitch = -1000;
 
 // auto-scan state
-int scanYawIndex   = 0;
-int scanPitchIndex = 0;
-int scanDirection  = 1;     // +1 = yaw increasing, -1 = decreasing (serpentine)
+int scanYawIndex       = 0;
+int scanPitchIndex     = 0;
+int scanDirection      = 1;     // +1 = yaw increasing, -1 = decreasing (serpentine)
+int scanPitchDirection = 1;     // +1 = walking down rows, -1 = walking up rows
 
 // =====================================================================
 //  SETUP / LOOP
@@ -292,6 +293,7 @@ void resetScan() {
   scanYawIndex = 0;
   scanPitchIndex = 0;
   scanDirection = 1;
+  scanPitchDirection = 1;
   Serial.println(F("S,START"));
 }
 
@@ -308,18 +310,28 @@ void runAutoScanStep() {
   advanceScanIndex();
 }
 
-// Serpentine order: left->right on one row, right->left on the next (minimal travel)
+// Serpentine order: left->right on one row, right->left on the next (minimal travel).
+// Bidirectional pitch: walks down row-by-row, then walks back up without jumping.
 void advanceScanIndex() {
   scanYawIndex += scanDirection;
 
   if (scanYawIndex < 0 || scanYawIndex >= yawStepsCount()) {
     scanYawIndex -= scanDirection;
     scanDirection = -scanDirection;
-    scanPitchIndex++;
 
-    if (scanPitchIndex >= pitchStepsCount()) {
+    if (pitchStepsCount() <= 1) {
       Serial.println(F("S,END"));
-      resetScan();
+      Serial.println(F("S,START"));
+      return;
+    }
+
+    scanPitchIndex += scanPitchDirection;
+
+    if (scanPitchIndex >= pitchStepsCount() || scanPitchIndex < 0) {
+      Serial.println(F("S,END"));
+      scanPitchDirection = -scanPitchDirection;
+      scanPitchIndex += 2 * scanPitchDirection;
+      Serial.println(F("S,START"));
     }
   }
 }
