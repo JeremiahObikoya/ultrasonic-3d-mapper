@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Live 3D mapper for the pan/tilt ultrasonic scanner.
+Live 3D point cloud mapper for the pan/tilt ultrasonic scanner.
 
-    pip install pyserial matplotlib numpy scipy
+    pip install pyserial matplotlib numpy
 
     python mapper.py --port COM3            # Windows
     python mapper.py --port /dev/ttyUSB0    # Linux / macOS: /dev/cu.usbmodemXXXX
@@ -22,23 +22,24 @@ import random
 import threading
 import time
 
-import matplotlib.pyplot as plt
+import matplotlib
 import matplotlib.cm as mcm
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from scipy.spatial import Delaunay
 
 
 # ----------------------------------------------------------------------
 #  Arguments
 # ----------------------------------------------------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Live 3D ultrasonic map")
+    p = argparse.ArgumentParser(description="Live 3D ultrasonic point cloud map")
     p.add_argument("--port", help="serial port (auto-detected if omitted)")
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--demo", action="store_true", help="simulate a scanner, no hardware needed")
     p.add_argument("--max-range", type=float, default=200, help="plot half-size in cm")
+    p.add_argument("--floor-z", type=float, default=-60.0, help="floor plane elevation in cm (default: -60)")
     p.add_argument("--yaw-center", type=float, default=90, help="servo yaw angle that points straight ahead")
     p.add_argument("--pitch-center", type=float, default=90, help="servo pitch angle that is level")
     p.add_argument("--invert-yaw", action="store_true", help="flip left/right")
@@ -144,7 +145,8 @@ class MapState:
     def __init__(self, args):
         self.args = args
         self.points = {}          # (yaw, pitch) -> (x, y, z, dist); newest reading wins
-        self.mode = "?"
+        self.last_reading = None  # (x, y, z, dist, yaw, pitch) of latest measurement
+        self.mode = "STANDBY"
         self.scans_done = 0
         self.dirty = True
 
@@ -159,11 +161,14 @@ class MapState:
                 yaw, pitch, dist = float(parts[1]), float(parts[2]), float(parts[3])
                 if dist <= 0:     # no valid echo at this point
                     return
-                self.points[(round(yaw, 1), round(pitch, 1))] = (*to_xyz(yaw, pitch, dist, a), dist)
+                xyz = to_xyz(yaw, pitch, dist, a)
+                self.points[(round(yaw, 1), round(pitch, 1))] = (*xyz, dist)
+                self.last_reading = (*xyz, dist, yaw, pitch)
                 self.dirty = True
             elif parts[0] == "S":
                 if parts[1] == "START" and not a.accumulate:
                     self.points.clear()
+                    self.last_reading = None
                     self.dirty = True
                 elif parts[1] == "END":
                     self.scans_done += 1
@@ -178,6 +183,7 @@ class MapState:
 
     def clear(self):
         self.points.clear()
+        self.last_reading = None
         self.dirty = True
 
     def save_csv(self, path):
@@ -207,24 +213,89 @@ def main():
     src.start()
 
     R = args.max_range
-    fig = plt.figure(figsize=(9, 7))
-    ax = fig.add_subplot(111, projection="3d")
-    ax.set_xlim(-R, R); ax.set_ylim(-R, R); ax.set_zlim(-R, R)
-    ax.set_box_aspect((1, 1, 1))
-    ax.set_xlabel("X right (cm)"); ax.set_ylabel("Y forward (cm)"); ax.set_zlabel("Z up (cm)")
-    ax.view_init(elev=20, azim=-90)
-    ax.scatter([0], [0], [0], c="red", s=80, marker="^", label="sensor")
+    z_floor = args.floor_z
+    x_min, x_max = -R * 0.9, R * 0.9
+    y_min, y_max = -15, R * 1.25
+    z_min, z_max = z_floor - 10, R * 0.85
 
-    # Colourmap / normalisation shared between surface and fallback scatter
-    cmap = mcm.get_cmap("turbo_r")
-    norm = mcolors.Normalize(vmin=0, vmax=R * 1.5)
+    # 1. Figure & 3D Axes with Dark Robotics / LiDAR Styling
+    fig = plt.figure(figsize=(10, 8), facecolor="#0b0f19")
+    if hasattr(fig.canvas.manager, "set_window_title"):
+        fig.canvas.manager.set_window_title("3D Ultrasonic Scanner — Live Point Cloud")
+    ax = fig.add_subplot(111, projection="3d", facecolor="#0b0f19")
+    ax.set_facecolor("#0b0f19")
 
-    # Thin fallback scatter (visible only while < 3 points)
-    scat = ax.scatter([0], [0], [0], c=[0], cmap=cmap, norm=norm, s=12, alpha=0.4)
-    fig.colorbar(mcm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, shrink=0.6, label="distance (cm)")
+    # Dark background panes
+    pane_color = (0.05, 0.08, 0.14, 0.9)
+    ax.xaxis.set_pane_color(pane_color)
+    ax.yaxis.set_pane_color(pane_color)
+    ax.zaxis.set_pane_color(pane_color)
 
-    # Handle to the current surface so we can remove it each frame
-    surf_handle = [None]
+    # Clean grid lines & tick parameters
+    ax.grid(True, color="#1e293b", linestyle="--", linewidth=0.6, alpha=0.8)
+    ax.tick_params(colors="#94a3b8", labelsize=8)
+    ax.set_xlabel("X (Right) cm", color="#cbd5e1", labelpad=8, fontsize=9)
+    ax.set_ylabel("Y (Forward) cm", color="#cbd5e1", labelpad=8, fontsize=9)
+    ax.set_zlabel("Z (Up) cm", color="#cbd5e1", labelpad=8, fontsize=9)
+
+    # 2. View bounds & True Physical 1:1:1 Aspect Ratio
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_zlim(z_min, z_max)
+    ax.set_box_aspect(((x_max - x_min), (y_max - y_min), (z_max - z_min)))
+    ax.view_init(elev=22, azim=-68)
+
+    # 3. Ground Radar Reference Grid (at z_floor)
+    arc_angles = np.linspace(-np.radians(75), np.radians(75), 60)
+    for r in [50, 100, 150, 200, 250]:
+        if r <= y_max:
+            xs = r * np.sin(arc_angles)
+            ys = r * np.cos(arc_angles)
+            zs = np.full_like(xs, z_floor)
+            ax.plot(xs, ys, zs, color="#1e3a5f", linestyle=":", linewidth=0.8, alpha=0.65)
+            ax.text(0, r, z_floor, f"{r} cm", color="#475569", fontsize=7.5,
+                    ha="center", va="bottom", zorder=2)
+
+    for deg in [-60, -30, 0, 30, 60]:
+        rad = np.radians(deg)
+        r_spoke = min(y_max, R * 1.2)
+        ax.plot([0, r_spoke * np.sin(rad)], [0, r_spoke * np.cos(rad)], [z_floor, z_floor],
+                color="#1e293b", linestyle="--", linewidth=0.7, alpha=0.6)
+
+    # 4. Scanner Station (Pedestal + Base + Sensor Head)
+    ax.plot([0, 0], [0, 0], [z_floor, 0], color="#0ea5e9", linewidth=2.2, alpha=0.75, label="Scanner Mount")
+    base_angles = np.linspace(0, 2 * np.pi, 24)
+    ax.plot(8 * np.cos(base_angles), 8 * np.sin(base_angles), np.full_like(base_angles, z_floor),
+            color="#0ea5e9", linewidth=1.2, alpha=0.6)
+    ax.scatter([0], [0], [0], c="#38bdf8", s=110, marker="^", depthshade=False, label="Sensor Origin")
+    ax.plot([0, 0], [0, 15], [0, 0], color="#38bdf8", linewidth=2.0, alpha=0.9)
+
+    # 5. Live Acoustic Pulse Beam & Active Ping Marker
+    beam_line, = ax.plot([], [], [], color="#38bdf8", linewidth=1.5, alpha=0.85, linestyle="-")
+    ping_dot = ax.scatter([], [], [], c="#f43f5e", s=80, marker="o", depthshade=False)
+
+    # 6. Point Cloud Scatter (Dual-layer emissive LiDAR styling)
+    cmap = matplotlib.colormaps["turbo_r"]
+    norm = mcolors.Normalize(vmin=0, vmax=R * 1.3)
+    scat_glow = ax.scatter([], [], [], c=[], cmap=cmap, norm=norm, s=55, alpha=0.25, edgecolors="none")
+    scat_core = ax.scatter([], [], [], c=[], cmap=cmap, norm=norm, s=18, alpha=0.92, edgecolors="#ffffff", linewidths=0.2)
+
+    cbar = fig.colorbar(mcm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, shrink=0.55, aspect=18, pad=0.08)
+    cbar.set_label("Echo Distance (cm)", color="#94a3b8", fontsize=9, labelpad=8)
+    cbar.ax.tick_params(colors="#94a3b8", labelsize=8)
+    cbar.outline.set_edgecolor("#1e293b")
+
+    # 7. Telemetry HUD Banner & Footer
+    hud_banner = ax.set_title(
+        "3D ULTRASONIC SCANNER  |  INITIALIZING...",
+        color="#e2e8f0",
+        fontsize=10,
+        fontweight="bold",
+        pad=14,
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="#0f172a", edgecolor="#1e293b", alpha=0.9)
+    )
+    fig.text(0.5, 0.02, "[D] Clear Map    •    Left-Drag: Rotate    •    Right-Drag/Scroll: Zoom",
+             ha="center", color="#64748b", fontsize=8.5)
 
     def update(_frame):
         while True:
@@ -232,55 +303,45 @@ def main():
                 state.handle_line(q.get_nowait())
             except queue.Empty:
                 break
-        if state.dirty and state.points:
-            keys = list(state.points.keys())
-            vals = np.array([state.points[k] for k in keys])
-            xs, ys, zs, ds = vals[:, 0], vals[:, 1], vals[:, 2], vals[:, 3]
-
-            # Remove the previous surface
-            if surf_handle[0] is not None:
-                surf_handle[0].remove()
-                surf_handle[0] = None
-
-            if len(keys) >= 3:
-                # Triangulate in angle space for a clean mesh
-                angles = np.array(keys, dtype=float)
-                try:
-                    tri = Delaunay(angles)
-                    surf_handle[0] = ax.plot_trisurf(
-                        xs, ys, zs,
-                        triangles=tri.simplices,
-                        cmap=cmap, norm=norm,
-                        edgecolor="none", alpha=0.85, shade=True,
-                    )
-                    # Colour each face by mean distance of its vertices
-                    face_dists = ds[tri.simplices].mean(axis=1)
-                    face_colours = cmap(norm(face_dists))
-                    surf_handle[0].set_facecolors(face_colours)
-                    # Hide the scatter dots when we have a surface
-                    scat._offsets3d = (np.array([]), np.array([]), np.array([]))
-                    scat.set_array(np.array([]))
-                except Exception:
-                    # Degenerate point set → fall back to scatter
-                    scat._offsets3d = (xs, ys, zs)
-                    scat.set_array(ds)
+        if state.dirty:
+            if state.points:
+                pts = np.array(list(state.points.values()))
+                xs, ys, zs, ds = pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]
+                scat_glow._offsets3d = (xs, ys, zs)
+                scat_glow.set_array(ds)
+                scat_core._offsets3d = (xs, ys, zs)
+                scat_core.set_array(ds)
             else:
-                scat._offsets3d = (xs, ys, zs)
-                scat.set_array(ds)
+                empty = np.array([])
+                scat_glow._offsets3d = (empty, empty, empty)
+                scat_glow.set_array(empty)
+                scat_core._offsets3d = (empty, empty, empty)
+                scat_core.set_array(empty)
 
+            if state.last_reading:
+                lx, ly, lz, ld, lyaw, lpitch = state.last_reading
+                beam_line.set_data_3d([0, lx], [0, ly], [0, lz])
+                ping_dot._offsets3d = ([lx], [ly], [lz])
+                hud_ping = f"YAW: {lyaw:.1f}°  PITCH: {lpitch:.1f}°  DIST: {ld:.1f} cm"
+            else:
+                beam_line.set_data_3d([], [], [])
+                ping_dot._offsets3d = ([], [], [])
+                hud_ping = "STANDBY"
+
+            mode_str = "AUTO SCAN" if "AUTO" in state.mode else ("JOYSTICK" if "JOY" in state.mode else state.mode)
+            hud_banner.set_text(
+                f"MODE: {mode_str}   |   POINTS: {len(state.points)}   |   SCANS: {state.scans_done}   |   {hud_ping}"
+            )
             state.dirty = False
-        ax.set_title(f"Mode: {state.mode}   Points: {len(state.points)}   Scans: {state.scans_done}")
-        return (scat,)
+
+        return (scat_core, scat_glow, beam_line, ping_dot)
 
     def on_key(event):
         if event.key == "d":
             state.clear()
-            if surf_handle[0] is not None:
-                surf_handle[0].remove()
-                surf_handle[0] = None
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-    ani = FuncAnimation(fig, update, interval=150, cache_frame_data=False)  # noqa: F841
+    ani = FuncAnimation(fig, update, interval=100, cache_frame_data=False)  # noqa: F841
     try:
         plt.show()
     finally:

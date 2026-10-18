@@ -1,7 +1,7 @@
 # 3D Ultrasonic Room Scanner
 
 Pan/tilt servo rig with an HC-SR04 ultrasonic sensor, controlled by an Arduino,
-with a live 3D surface-mapped visualisation in Python.
+with a live 3D point cloud visualisation in Python.
 
 <!-- Add a photo or GIF of the project here:
 ![demo](docs/demo.gif)
@@ -63,10 +63,11 @@ python mapper.py --demo                 # no hardware — simulated room
 2. At each angle it fires the ultrasonic sensor and averages 3 readings.
 3. `(yaw, pitch, distance)` tuples are streamed over serial at 115200 baud.
 4. The Python mapper converts spherical → Cartesian coordinates and renders a
-   Delaunay-triangulated surface coloured by distance.
+   real-time 3D point cloud coloured by echo distance.
 
 See [docs/serial_protocol.md](docs/serial_protocol.md) for the full message format.
 
 ## License
 
 [MIT](LICENSE)
+
